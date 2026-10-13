@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { spawn } from 'child_process';
 import { logger } from '../utils/logger.js';
 import { get } from '../utils/config.js';
@@ -114,20 +115,22 @@ export async function launchChromeDirect(options = {}) {
     throw new FlowError(ErrorCodes.PLAYWRIGHT_ERROR, `Chrome not found at ${chromePath}`);
   }
 
-  const tempDir = `/tmp/chrome-kiara-cdp-${Date.now()}`;
+  const persistentDir = options.persistentDir;
+  const tempDir = persistentDir || path.join(os.tmpdir(), `chrome-kiara-cdp-${Date.now()}`);
   fs.mkdirSync(tempDir, { recursive: true });
 
-  const localStateSrc = path.resolve(path.dirname(profileSource), '../Local State');
-  if (fs.existsSync(profileSource)) {
-    fs.cpSync(profileSource, path.join(tempDir, 'Profile 3'), { recursive: true });
+  if (!persistentDir) {
+    const localStateSrc = path.resolve(path.dirname(profileSource), 'Local State');
+    if (fs.existsSync(profileSource)) {
+      fs.cpSync(profileSource, path.join(tempDir, 'Profile 3'), { recursive: true });
+    }
+    if (fs.existsSync(localStateSrc)) {
+      fs.cpSync(localStateSrc, path.join(tempDir, 'Local State'));
+    } else {
+      fs.writeFileSync(path.join(tempDir, 'Local State'), JSON.stringify({ profile: { info_cache: {} } }));
+    }
+    logger.info('Temp profile created with cookies', { tempDir });
   }
-  if (fs.existsSync(localStateSrc)) {
-    fs.cpSync(localStateSrc, path.join(tempDir, 'Local State'));
-  } else {
-    fs.writeFileSync(path.join(tempDir, 'Local State'), JSON.stringify({ profile: { info_cache: {} } }));
-  }
-
-  logger.info('Temp profile created with cookies', { tempDir });
 
   try {
     const existing = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
@@ -138,7 +141,7 @@ export async function launchChromeDirect(options = {}) {
   const args = [
     `--remote-debugging-port=${cdpPort}`,
     `--user-data-dir=${tempDir}`,
-    '--profile-directory=Profile 3',
+    ...(persistentDir ? [] : ['--profile-directory=Profile 3']),
     '--no-first-run', '--no-default-browser-check',
     '--disable-blink-features=AutomationControlled',
     '--window-size=1920,1080',
@@ -167,7 +170,8 @@ export async function launchChromeDirect(options = {}) {
   context = browser.contexts()[0];
   page = context.pages()[0] || await context.newPage();
   isConnected = true;
-  global.__chromeTempDir = tempDir;
+  // Never delete a persistent profile on disconnect
+  global.__chromeTempDir = persistentDir ? null : tempDir;
 
   logger.info('Chrome direct + CDP connected', { webdriver: await page.evaluate(() => navigator.webdriver) });
   return { browser, context, page };
